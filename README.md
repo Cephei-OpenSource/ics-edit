@@ -1,16 +1,20 @@
 # ICS-Edit
 
-`ICS-Edit` currently consists of only `remove-old-ics-entries.py`.
+`ICS-Edit` is centered around `remove-old-ics-entries.py`.
 
 The script removes expired calendar entries in an ICS file. Entries are deleted only if they, and possible repetitions, end before a cutoff date passed on the command line (default: beginning of the current year). An entry without an end limit is never deleted.
 
 ## Features
 
-- Removes single events before a cutoff date.
-- Removes recurring events only when the series has a clear end (`UNTIL` or `COUNT`) and the last occurrence is before cutoff.
+- Removes single events whose end (`DTEND` or `DTSTART + DURATION`) is before a cutoff date.
+- Removes recurring events only when the series has a clear end (`UNTIL` or `COUNT`) and the last occurrence end is before cutoff.
 - Keeps recurring events without `UNTIL`/`COUNT`.
-- Preserves calendar metadata and non-event components (`VTODO`, `VTIMEZONE`, `VJOURNAL`).
+- Keeps events without end information (`DTEND` and `DURATION` both missing).
+- Preserves calendar metadata and non-event components.
 - Writes to stdout by default or to an output file.
+- Supports `--dry-run` and `--stats` to preview changes safely.
+- Supports `--in-place` with automatic backup creation.
+- Supports `--deleted-log` to export all deleted entries for manual review.
 
 ## Requirements
 
@@ -29,7 +33,7 @@ pip install icalendar pytz python-dateutil
 ## Usage
 
 ```bash
-python3 remove-old-ics-entries.py [-h] [-d DATE] [-t TIMEZONE] [-o OUTPUT] input_filename
+python3 remove-old-ics-entries.py [-h] [-d DATE] [-t TIMEZONE] [-o OUTPUT] [--dry-run] [--stats] [--deleted-log FILE] [--in-place] [--backup-suffix SUFFIX] [--no-backup] input_filename
 ```
 
 Arguments:
@@ -41,6 +45,12 @@ Arguments:
   - default: `Europe/Berlin`
 - `-o, --output`: output filename
   - default: stdout
+- `--dry-run`: analyze only, do not write cleaned ICS output
+- `--stats`: print keep/remove counters and reasons to stderr
+- `--deleted-log FILE`: write every deleted `VEVENT` to a TSV file
+- `--in-place`: overwrite input file with cleaned output
+- `--backup-suffix SUFFIX`: backup suffix for `--in-place` (default: `.bak`)
+- `--no-backup`: disable backup creation when using `--in-place`
 
 ## Examples
 
@@ -56,19 +66,42 @@ Write result to stdout:
 python3 remove-old-ics-entries.py -d 2024-01-01 calendar.ics > cleaned.ics
 ```
 
+Preview only with stats and deleted entries list:
+
+```bash
+python3 remove-old-ics-entries.py -d 2025-07-01 --dry-run --stats --deleted-log deleted.tsv calendar.ics
+```
+
+Edit file in place and create automatic backup:
+
+```bash
+python3 remove-old-ics-entries.py -d 2025-07-01 --in-place calendar.ics
+```
+
 ## Current Behavior Notes
 
-- For non-recurring events, the script compares `DTSTART` with the cutoff date.
+- For non-recurring events:
+  - with `DTEND` or `DURATION`: compares computed end with cutoff.
+  - without `DTEND` and without `DURATION`: always kept.
 - For recurring events:
-  - with `UNTIL`: deletes if the last computed occurrence is before cutoff.
-  - with `COUNT`: deletes if the last computed occurrence is before cutoff.
-  - without `UNTIL` and without `COUNT`: kept.
+  - with `UNTIL` or `COUNT`: deletes if the last occurrence end is before cutoff.
+  - without `UNTIL`/`COUNT`: kept.
+  - without event duration/end information: kept.
+- `EXDATE` and `RDATE` are considered when determining the last finite recurrence occurrence.
 - Dates are evaluated in the timezone passed via `--timezone` (default: `Europe/Berlin`).
+- Malformed events are kept and reported as warnings on stderr.
+
+## Tests
+
+Run the test suite:
+
+```bash
+python3 -m unittest -v tests/test_remove_old_ics_entries.py
+```
 
 ## Limitations
 
-- The deletion logic is based on event start times and series boundaries, not explicit `DTEND` duration checks.
-- Very complex recurrence rules may require additional validation with real data.
+- Very complex recurrence rules (especially with `EXDATE`/`RDATE`) may require additional validation with real data.
 
 ## License
 

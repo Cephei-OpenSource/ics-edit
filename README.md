@@ -29,7 +29,7 @@ pip install icalendar pytz python-dateutil
 ## Usage
 
 ```bash
-python3 remove-old-ics-entries.py [-h] [-d DATE] [-o OUTPUT] input_filename
+python3 remove-old-ics-entries.py [-h] [-d DATE] [-t TIMEZONE] [-o OUTPUT] input_filename
 ```
 
 Arguments:
@@ -37,6 +37,8 @@ Arguments:
 - `input_filename`: path to input ICS file (required)
 - `-d, --date`: cutoff date in format `YYYY-MM-DD`
   - default: `<current-year>-01-01`
+- `-t, --timezone`: timezone for date comparisons (IANA format)
+  - default: `Europe/Berlin`
 - `-o, --output`: output filename
   - default: stdout
 
@@ -45,7 +47,7 @@ Arguments:
 Write result to a file:
 
 ```bash
-python3 remove-old-ics-entries.py -d 2025-01-01 -o cleaned.ics calendar.ics
+python3 remove-old-ics-entries.py -d 2025-01-01 -t UTC -o cleaned.ics calendar.ics
 ```
 
 Write result to stdout:
@@ -61,7 +63,7 @@ python3 remove-old-ics-entries.py -d 2024-01-01 calendar.ics > cleaned.ics
   - with `UNTIL`: deletes if the last computed occurrence is before cutoff.
   - with `COUNT`: deletes if the last computed occurrence is before cutoff.
   - without `UNTIL` and without `COUNT`: kept.
-- Dates are evaluated in timezone `Europe/Berlin`.
+- Dates are evaluated in the timezone passed via `--timezone` (default: `Europe/Berlin`).
 
 ## Limitations
 
@@ -70,4 +72,4 @@ python3 remove-old-ics-entries.py -d 2024-01-01 calendar.ics > cleaned.ics
 
 ## License
 
-No license file is included yet. If you plan to publish publicly, add a `LICENSE` file.
+This project is licensed under the Apache License 2.0.

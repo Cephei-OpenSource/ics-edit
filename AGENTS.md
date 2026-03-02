@@ -9,6 +9,11 @@
 - Keep the project minimal and script-first.
 - Preserve existing CLI arguments and defaults unless explicitly changed.
 
+## Language Policy
+- Use English only for code comments, documentation, commit messages, issue text, and pull requests.
+- Keep user-facing CLI text in English.
+- This language policy applies even if the chat with the user is in another language.
+
 ## Coding Guidelines
 - Use Python 3.
 - Favor small, readable functions.

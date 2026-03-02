@@ -32,6 +32,8 @@ htmlcov/
 
 # Local data and backups
 *.ics
+!tests/fixtures/
+!tests/fixtures/*.ics
 *.bak
 backup/
 remove-old-ics-entries-v1.zip

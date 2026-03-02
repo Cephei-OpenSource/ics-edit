@@ -6,6 +6,7 @@ tests/__pycache__/
 *.pyd
 *.so
 *.tsv
+*.bak
 *.egg-info/
 .eggs/
 build/

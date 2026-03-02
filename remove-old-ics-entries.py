@@ -15,6 +15,7 @@ from icalendar import Calendar
 from pytz import UnknownTimeZoneError, timezone
 
 DEFAULT_TIMEZONE = "Europe/Berlin"
+MAX_BACKUP_SUFFIX_INDEX = 1000
 
 REASON_REMOVED_SINGLE_ENDED_BEFORE_CUTOFF = "removed_single_ended_before_cutoff"
 REASON_REMOVED_FINITE_RECURRENCE_ENDED_BEFORE_CUTOFF = (
@@ -78,7 +79,7 @@ def get_event_duration(component, event_start, fallback_tz):
     return duration
 
 
-def parse_rrule(rrule_component, event_start):
+def parse_rrule(rrule_component, event_start, component=None):
     rrule_string = str(rrule_component.to_ical(), "utf-8")
 
     try:
@@ -90,6 +91,12 @@ def parse_rrule(rrule_component, event_start):
 
         # Fallback for non-compliant ICS input where DTSTART is timezone-aware
         # but UNTIL is not expressed in UTC.
+        if component is not None:
+            warn_event(
+                component,
+                "RRULE UNTIL is not UTC while DTSTART is timezone-aware; "
+                "using naive DTSTART fallback and recurrence boundaries may be inaccurate.",
+            )
         naive_start = event_start.replace(tzinfo=None)
         return rrulestr(rrule_string, dtstart=naive_start)
 
@@ -120,7 +127,7 @@ def get_last_occurrence_start(component, event_start, fallback_tz):
     if not (has_until or has_count):
         return None
 
-    rule = parse_rrule(rrule_component, event_start)
+    rule = parse_rrule(rrule_component, event_start, component)
 
     try:
         last_occurrence = rule[-1]
@@ -333,13 +340,16 @@ def write_calendar_bytes(data, output_target):
 def backup_file(input_path, backup_suffix):
     backup_path = Path(f"{input_path}{backup_suffix}")
     if backup_path.exists():
-        index = 1
-        while True:
+        for index in range(1, MAX_BACKUP_SUFFIX_INDEX + 1):
             candidate = Path(f"{input_path}{backup_suffix}.{index}")
             if not candidate.exists():
                 backup_path = candidate
                 break
-            index += 1
+        else:
+            raise RuntimeError(
+                f"Could not create backup file: exhausted {MAX_BACKUP_SUFFIX_INDEX} "
+                f"suffixes for {input_path}{backup_suffix}.*"
+            )
 
     shutil.copy2(input_path, backup_path)
     return str(backup_path)
@@ -357,6 +367,7 @@ def write_file_atomic(path, data):
             temp_path = temp_file.name
 
         os.replace(temp_path, path)
+        temp_path = None
     finally:
         if temp_path and os.path.exists(temp_path):
             os.unlink(temp_path)

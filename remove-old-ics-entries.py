@@ -24,7 +24,11 @@ REASON_REMOVED_FINITE_RECURRENCE_ENDED_BEFORE_CUTOFF = (
 REASON_KEPT_END_ON_OR_AFTER_CUTOFF = "kept_end_on_or_after_cutoff"
 REASON_KEPT_MISSING_END = "kept_missing_end"
 REASON_KEPT_OPEN_RECURRENCE = "kept_open_recurrence"
+REASON_KEPT_OPEN_RECURRENCE_SHIFTED = (
+    "kept_open_recurrence_shifted_to_post_cutoff_start"
+)
 REASON_KEPT_MALFORMED = "kept_malformed"
+REASON_PRUNED_EXDATE_BEFORE_CUTOFF = "pruned_exdate_before_cutoff"
 
 
 def to_aware_datetime(value, fallback_tz):
@@ -170,6 +174,97 @@ def get_last_occurrence_start(component, event_start, fallback_tz):
     return last_occurrence
 
 
+def get_first_occurrence_on_or_after_cutoff(
+    component, event_start, cutoff_date, fallback_tz
+):
+    cutoff_canonical = canonical_datetime(cutoff_date)
+    excluded = {
+        canonical_datetime(value)
+        for value in iter_property_datetimes(component, "EXDATE", fallback_tz)
+    }
+
+    candidate = None
+    rrule_component = component.get("RRULE")
+    if rrule_component is not None:
+        rule = parse_rrule(rrule_component, event_start, component)
+        try:
+            next_occurrence = rule.after(cutoff_date, inc=True)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(f"Could not determine next recurrence: {exc}") from exc
+
+        while next_occurrence is not None:
+            next_occurrence = to_aware_datetime(next_occurrence, fallback_tz)
+            if canonical_datetime(next_occurrence) not in excluded:
+                candidate = next_occurrence
+                break
+            next_occurrence = rule.after(next_occurrence, inc=False)
+
+    for rdate in iter_property_datetimes(component, "RDATE", fallback_tz):
+        canonical_rdate = canonical_datetime(rdate)
+        if canonical_rdate in excluded:
+            continue
+        if canonical_rdate < cutoff_canonical:
+            continue
+        if candidate is None or canonical_rdate < canonical_datetime(candidate):
+            candidate = rdate
+
+    return candidate
+
+
+def convert_aware_to_original_type(value, original, fallback_tz):
+    if isinstance(original, datetime):
+        if original.tzinfo is None:
+            return value.astimezone(fallback_tz).replace(tzinfo=None)
+        return value.astimezone(original.tzinfo)
+
+    if isinstance(original, date):
+        return value.astimezone(fallback_tz).date()
+
+    raise ValueError(f"Unsupported date value type: {type(original).__name__}")
+
+
+def update_component_datetime(component, property_name, aware_value, fallback_tz):
+    property_value = component.get(property_name)
+    if property_value is None:
+        return
+
+    original = property_value.dt
+    property_value.dt = convert_aware_to_original_type(aware_value, original, fallback_tz)
+
+
+def shift_open_recurrence_start(component, cutoff_date, comparison_tz):
+    if component.get("RECURRENCE-ID") is not None:
+        return False
+
+    rrule_component = component.get("RRULE")
+    if rrule_component is None:
+        return False
+
+    if "UNTIL" in rrule_component or "COUNT" in rrule_component:
+        return False
+
+    event_start = get_event_start(component, comparison_tz)
+    if canonical_datetime(event_start) > canonical_datetime(cutoff_date):
+        return False
+
+    next_occurrence = get_first_occurrence_on_or_after_cutoff(
+        component, event_start, cutoff_date, comparison_tz
+    )
+    if next_occurrence is None:
+        return False
+
+    if canonical_datetime(next_occurrence) <= canonical_datetime(event_start):
+        return False
+
+    duration = get_event_duration(component, event_start, comparison_tz)
+    update_component_datetime(component, "DTSTART", next_occurrence, comparison_tz)
+
+    if component.get("DTEND") is not None and duration is not None:
+        update_component_datetime(component, "DTEND", next_occurrence + duration, comparison_tz)
+
+    return True
+
+
 def classify_event(component, cutoff_date, comparison_tz):
     event_start = get_event_start(component, comparison_tz)
     duration = get_event_duration(component, event_start, comparison_tz)
@@ -272,6 +367,119 @@ def write_deleted_log(log_path, rows):
         writer.writerows(rows)
 
 
+def pruned_exdate_record(component, exdate_value, reason):
+    rrule = component.get("RRULE")
+    if rrule is None:
+        rrule_value = ""
+    else:
+        rrule_value = str(rrule.to_ical(), "utf-8")
+
+    summary = component.get("SUMMARY")
+
+    return {
+        "uid": event_uid(component),
+        "recurrence_id": "",
+        "dtstart": str(exdate_value),
+        "dtend": "",
+        "duration": "",
+        "rrule": rrule_value,
+        "reason": reason,
+        "summary": "" if summary is None else str(summary),
+    }
+
+
+def prune_old_exdates(component, cutoff_date, fallback_tz):
+    exdate_properties = component.get("EXDATE")
+    if exdate_properties is None:
+        return []
+
+    if not isinstance(exdate_properties, list):
+        exdate_properties = [exdate_properties]
+
+    cutoff_canonical = canonical_datetime(cutoff_date)
+    kept_groups = []
+    removed_values = []
+
+    for prop in exdate_properties:
+        values = []
+        if hasattr(prop, "dts"):
+            values = [entry.dt for entry in prop.dts]
+        elif hasattr(prop, "dt"):
+            values = [prop.dt]
+        else:
+            continue
+
+        kept_values = []
+        for value in values:
+            if canonical_datetime(to_aware_datetime(value, fallback_tz)) < cutoff_canonical:
+                removed_values.append(value)
+            else:
+                kept_values.append(value)
+
+        if kept_values:
+            kept_groups.append((kept_values, dict(getattr(prop, "params", {}))))
+
+    if not removed_values:
+        return []
+
+    if "EXDATE" in component:
+        del component["EXDATE"]
+
+    for kept_values, params in kept_groups:
+        value = kept_values if len(kept_values) > 1 else kept_values[0]
+        component.add("EXDATE", value, parameters=params)
+
+    return removed_values
+
+
+def shifted_event_record(component, old_dtstart, old_dtend, reason):
+    rrule = component.get("RRULE")
+    if rrule is None:
+        rrule_value = ""
+    else:
+        rrule_value = str(rrule.to_ical(), "utf-8")
+
+    recurrence_id = component.get("RECURRENCE-ID")
+    recurrence_id_value = ""
+    if recurrence_id is not None:
+        recurrence_id_value = str(getattr(recurrence_id, "dt", recurrence_id))
+
+    summary = component.get("SUMMARY")
+
+    return {
+        "uid": event_uid(component),
+        "recurrence_id": recurrence_id_value,
+        "old_dtstart": old_dtstart,
+        "new_dtstart": format_component_datetime(component, "DTSTART"),
+        "old_dtend": old_dtend,
+        "new_dtend": format_component_datetime(component, "DTEND"),
+        "rrule": rrule_value,
+        "reason": reason,
+        "summary": "" if summary is None else str(summary),
+    }
+
+
+def write_shifted_log(log_path, rows):
+    with open(log_path, "w", encoding="utf-8", newline="") as file_handle:
+        writer = csv.DictWriter(
+            file_handle,
+            fieldnames=[
+                "uid",
+                "recurrence_id",
+                "old_dtstart",
+                "new_dtstart",
+                "old_dtend",
+                "new_dtend",
+                "rrule",
+                "reason",
+                "summary",
+            ],
+            delimiter="\t",
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def print_stats(stats):
     sys.stderr.write("Processing stats:\n")
     sys.stderr.write(f"  VEVENT processed: {stats['total_vevents']}\n")
@@ -283,7 +491,13 @@ def print_stats(stats):
         sys.stderr.write(f"    {reason}: {count}\n")
 
 
-def build_clean_calendar(cal, cutoff_date, comparison_tz):
+def build_clean_calendar(
+    cal,
+    cutoff_date,
+    comparison_tz,
+    shift_open_recurrence_starts=False,
+    prune_old_exceptions=False,
+):
     new_cal = Calendar()
 
     # Preserve calendar metadata (PRODID, VERSION, X-WR-*).
@@ -292,6 +506,7 @@ def build_clean_calendar(cal, cutoff_date, comparison_tz):
 
     reason_counts = Counter()
     deleted_rows = []
+    shifted_rows = []
     total_vevents = 0
     kept_total = 0
     removed_total = 0
@@ -309,12 +524,46 @@ def build_clean_calendar(cal, cutoff_date, comparison_tz):
             should_delete = False
             warn_event(component, f"{exc}. Keeping event unchanged.")
 
+        if (
+            shift_open_recurrence_starts
+            and not should_delete
+            and reason == REASON_KEPT_OPEN_RECURRENCE
+        ):
+            try:
+                old_dtstart = format_component_datetime(component, "DTSTART")
+                old_dtend = format_component_datetime(component, "DTEND")
+                if shift_open_recurrence_start(component, cutoff_date, comparison_tz):
+                    reason = REASON_KEPT_OPEN_RECURRENCE_SHIFTED
+                    shifted_rows.append(
+                        shifted_event_record(component, old_dtstart, old_dtend, reason)
+                    )
+            except Exception as exc:  # noqa: BLE001
+                warn_event(
+                    component,
+                    f"Could not shift open recurrence start: {exc}. Keeping event unchanged.",
+                )
+
         reason_counts[reason] += 1
 
         if should_delete:
             removed_total += 1
             deleted_rows.append(deleted_event_record(component, reason))
             continue
+
+        if prune_old_exceptions:
+            try:
+                removed_exdates = prune_old_exdates(component, cutoff_date, comparison_tz)
+                for exdate_value in removed_exdates:
+                    deleted_rows.append(
+                        pruned_exdate_record(
+                            component, exdate_value, REASON_PRUNED_EXDATE_BEFORE_CUTOFF
+                        )
+                    )
+            except Exception as exc:  # noqa: BLE001
+                warn_event(
+                    component,
+                    f"Could not prune old EXDATE entries: {exc}. Keeping EXDATE values unchanged.",
+                )
 
         kept_total += 1
         new_cal.add_component(component)
@@ -325,7 +574,7 @@ def build_clean_calendar(cal, cutoff_date, comparison_tz):
         "removed_total": removed_total,
         "reason_counts": reason_counts,
     }
-    return new_cal, stats, deleted_rows
+    return new_cal, stats, deleted_rows, shifted_rows
 
 
 def write_calendar_bytes(data, output_target):
@@ -380,6 +629,9 @@ def remove_old_events(
     timezone_name,
     dry_run=False,
     deleted_log_path=None,
+    shifted_log_path=None,
+    shift_open_recurrence_starts=False,
+    prune_old_exceptions=False,
 ):
     with open(ics_file_path, "r", encoding="utf-8") as file_handle:
         cal = Calendar.from_ical(file_handle.read())
@@ -387,10 +639,18 @@ def remove_old_events(
     comparison_tz = timezone(timezone_name)
     cutoff_date = comparison_tz.localize(cutoff_date)
 
-    new_cal, stats, deleted_rows = build_clean_calendar(cal, cutoff_date, comparison_tz)
+    new_cal, stats, deleted_rows, shifted_rows = build_clean_calendar(
+        cal,
+        cutoff_date,
+        comparison_tz,
+        shift_open_recurrence_starts=shift_open_recurrence_starts,
+        prune_old_exceptions=prune_old_exceptions,
+    )
 
     if deleted_log_path is not None:
         write_deleted_log(deleted_log_path, deleted_rows)
+    if shifted_log_path is not None:
+        write_shifted_log(shifted_log_path, shifted_rows)
 
     if not dry_run:
         calendar_bytes = new_cal.to_ical()
@@ -475,7 +735,24 @@ def parse_args():
     )
     parser.add_argument(
         "--deleted-log",
-        help="Write deleted VEVENT entries to a TSV file.",
+        help="Write deleted VEVENT entries and pruned exceptions to a TSV file.",
+    )
+    parser.add_argument(
+        "--shifted-log",
+        help="Write shifted VEVENT entries to a TSV file.",
+    )
+    parser.add_argument(
+        "--shift-open-recurrence-starts",
+        action="store_true",
+        help=(
+            "For open recurrences (RRULE without UNTIL/COUNT), move DTSTART and DTEND "
+            "to the first occurrence on or after cutoff."
+        ),
+    )
+    parser.add_argument(
+        "--prune-old-exceptions",
+        action="store_true",
+        help="Remove EXDATE entries that are before cutoff from kept events.",
     )
     parser.add_argument(
         "--in-place",
@@ -525,6 +802,9 @@ def main():
             args.timezone,
             dry_run=False,
             deleted_log_path=args.deleted_log,
+            shifted_log_path=args.shifted_log,
+            shift_open_recurrence_starts=args.shift_open_recurrence_starts,
+            prune_old_exceptions=args.prune_old_exceptions,
         )
     else:
         stats = remove_old_events(
@@ -534,6 +814,9 @@ def main():
             args.timezone,
             dry_run=args.dry_run,
             deleted_log_path=args.deleted_log,
+            shifted_log_path=args.shifted_log,
+            shift_open_recurrence_starts=args.shift_open_recurrence_starts,
+            prune_old_exceptions=args.prune_old_exceptions,
         )
 
     if args.stats:

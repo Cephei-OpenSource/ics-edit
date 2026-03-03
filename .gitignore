@@ -39,3 +39,5 @@ htmlcov/
 backup/
 remove-old-ics-entries-v1.zip
 vtimezone-entries.txt
+usage-example.bash
+*.cry

@@ -160,6 +160,57 @@ class CoreLogicUnitTests(unittest.TestCase):
             self.module.get_last_occurrence_start(component, event_start, self.utc)
         )
 
+    def test_get_first_occurrence_on_or_after_cutoff_skips_exdate(self):
+        component = self.first_vevent(
+            """
+            BEGIN:VCALENDAR
+            VERSION:2.0
+            PRODID:-//ics-edit tests//EN
+            BEGIN:VEVENT
+            UID:next-after-cutoff@example.com
+            DTSTART:20250629T100000Z
+            DTEND:20250629T110000Z
+            RRULE:FREQ=DAILY
+            EXDATE:20250702T100000Z
+            END:VEVENT
+            END:VCALENDAR
+            """
+        )
+        event_start = self.module.get_event_start(component, self.utc)
+        cutoff = self.utc.localize(datetime(2025, 7, 1, 12, 0))
+
+        next_occurrence = self.module.get_first_occurrence_on_or_after_cutoff(
+            component, event_start, cutoff, self.utc
+        )
+
+        expected = self.utc.localize(datetime(2025, 7, 3, 10, 0))
+        self.assertEqual(next_occurrence, expected)
+
+    def test_get_first_occurrence_on_or_after_cutoff_keeps_midnight_match(self):
+        component = self.first_vevent(
+            """
+            BEGIN:VCALENDAR
+            VERSION:2.0
+            PRODID:-//ics-edit tests//EN
+            BEGIN:VEVENT
+            UID:midnight-match@example.com
+            DTSTART:20241231T000000Z
+            DTEND:20241231T010000Z
+            RRULE:FREQ=DAILY
+            END:VEVENT
+            END:VCALENDAR
+            """
+        )
+        event_start = self.module.get_event_start(component, self.utc)
+        cutoff = self.utc.localize(datetime(2025, 1, 1, 0, 0))
+
+        next_occurrence = self.module.get_first_occurrence_on_or_after_cutoff(
+            component, event_start, cutoff, self.utc
+        )
+
+        expected = self.utc.localize(datetime(2025, 1, 1, 0, 0))
+        self.assertEqual(next_occurrence, expected)
+
 
 class RemoveOldIcsEntriesTests(unittest.TestCase):
     def setUp(self):
@@ -186,6 +237,11 @@ class RemoveOldIcsEntriesTests(unittest.TestCase):
     def assert_uid_absent(self, path, uid):
         content = path.read_text(encoding="utf-8")
         self.assertNotIn(uid, content)
+
+    def write_text(self, filename, content):
+        path = self.workdir / filename
+        path.write_text(textwrap.dedent(content).strip() + "\n", encoding="utf-8")
+        return path
 
     def test_no_dtend_is_kept(self):
         input_file = self.fixture_copy("no-dtend.ics")
@@ -317,6 +373,224 @@ class RemoveOldIcsEntriesTests(unittest.TestCase):
         self.assertEqual(remove_result.returncode, 0, msg=remove_result.stderr)
         self.assert_uid_present(output_file_utc, "UID:timezone-change@example.com")
         self.assert_uid_absent(output_file_lax, "UID:timezone-change@example.com")
+
+    def test_open_recurrence_start_remains_without_shift_flag(self):
+        input_file = self.write_text(
+            "open.ics",
+            """
+            BEGIN:VCALENDAR
+            VERSION:2.0
+            PRODID:-//ics-edit tests//EN
+            BEGIN:VEVENT
+            UID:open-weekly@example.com
+            DTSTART:20250629T100000Z
+            DTEND:20250629T110000Z
+            RRULE:FREQ=WEEKLY
+            END:VEVENT
+            END:VCALENDAR
+            """,
+        )
+        output_file = self.workdir / "out.ics"
+
+        result = self.run_script(
+            "-d",
+            "2025-07-01",
+            "-t",
+            "UTC",
+            "-o",
+            str(output_file),
+            str(input_file),
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        content = output_file.read_text(encoding="utf-8")
+        self.assertIn("DTSTART:20250629T100000Z", content)
+        self.assertIn("DTEND:20250629T110000Z", content)
+
+    def test_open_recurrence_start_can_be_shifted_after_cutoff(self):
+        input_file = self.write_text(
+            "open-shift.ics",
+            """
+            BEGIN:VCALENDAR
+            VERSION:2.0
+            PRODID:-//ics-edit tests//EN
+            BEGIN:VEVENT
+            UID:open-weekly-shift@example.com
+            DTSTART:20250629T100000Z
+            DTEND:20250629T110000Z
+            RRULE:FREQ=WEEKLY
+            END:VEVENT
+            END:VCALENDAR
+            """,
+        )
+        output_file = self.workdir / "out-shift.ics"
+
+        result = self.run_script(
+            "-d",
+            "2025-07-01",
+            "-t",
+            "UTC",
+            "--shift-open-recurrence-starts",
+            "-o",
+            str(output_file),
+            str(input_file),
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        content = output_file.read_text(encoding="utf-8")
+        self.assertIn("DTSTART:20250706T100000Z", content)
+        self.assertIn("DTEND:20250706T110000Z", content)
+        self.assertNotIn("DTSTART:20250629T100000Z", content)
+
+    def test_open_recurrence_shift_can_start_at_cutoff_midnight(self):
+        input_file = self.write_text(
+            "open-midnight-shift.ics",
+            """
+            BEGIN:VCALENDAR
+            VERSION:2.0
+            PRODID:-//ics-edit tests//EN
+            BEGIN:VEVENT
+            UID:open-midnight-shift@example.com
+            DTSTART:20241231T000000Z
+            DTEND:20241231T010000Z
+            RRULE:FREQ=DAILY
+            END:VEVENT
+            END:VCALENDAR
+            """,
+        )
+        output_file = self.workdir / "out-midnight-shift.ics"
+
+        result = self.run_script(
+            "-d",
+            "2025-01-01",
+            "-t",
+            "UTC",
+            "--shift-open-recurrence-starts",
+            "-o",
+            str(output_file),
+            str(input_file),
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        content = output_file.read_text(encoding="utf-8")
+        self.assertIn("DTSTART:20250101T000000Z", content)
+        self.assertIn("DTEND:20250101T010000Z", content)
+
+    def test_shifted_log_contains_shifted_events(self):
+        input_file = self.write_text(
+            "open-shift-log.ics",
+            """
+            BEGIN:VCALENDAR
+            VERSION:2.0
+            PRODID:-//ics-edit tests//EN
+            BEGIN:VEVENT
+            UID:open-shift-log@example.com
+            SUMMARY:Open Shift Log
+            DTSTART:20250629T100000Z
+            DTEND:20250629T110000Z
+            RRULE:FREQ=WEEKLY
+            END:VEVENT
+            END:VCALENDAR
+            """,
+        )
+        output_file = self.workdir / "out-shift-log.ics"
+        shifted_log = self.workdir / "shifted.tsv"
+
+        result = self.run_script(
+            "-d",
+            "2025-07-01",
+            "-t",
+            "UTC",
+            "--shift-open-recurrence-starts",
+            "--shifted-log",
+            str(shifted_log),
+            "-o",
+            str(output_file),
+            str(input_file),
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        log_content = shifted_log.read_text(encoding="utf-8")
+        self.assertIn("uid\trecurrence_id\told_dtstart\tnew_dtstart", log_content)
+        self.assertIn("open-shift-log@example.com", log_content)
+        self.assertIn("2025-06-29 10:00:00+00:00", log_content)
+        self.assertIn("2025-07-06 10:00:00+00:00", log_content)
+        self.assertIn("kept_open_recurrence_shifted_to_post_cutoff_start", log_content)
+
+    def test_prune_old_exceptions_removes_exdate_before_cutoff(self):
+        input_file = self.write_text(
+            "prune-exdate.ics",
+            """
+            BEGIN:VCALENDAR
+            VERSION:2.0
+            PRODID:-//ics-edit tests//EN
+            BEGIN:VEVENT
+            UID:prune-exdate@example.com
+            DTSTART:20240101T090000Z
+            DTEND:20240101T100000Z
+            RRULE:FREQ=WEEKLY
+            EXDATE:20240205T090000Z,20250707T090000Z
+            END:VEVENT
+            END:VCALENDAR
+            """,
+        )
+        output_file = self.workdir / "out-prune-exdate.ics"
+
+        result = self.run_script(
+            "-d",
+            "2025-01-01",
+            "-t",
+            "UTC",
+            "--prune-old-exceptions",
+            "-o",
+            str(output_file),
+            str(input_file),
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        content = output_file.read_text(encoding="utf-8")
+        self.assertNotIn("20240205T090000Z", content)
+        self.assertIn("20250707T090000Z", content)
+
+    def test_pruned_exdates_are_logged_via_deleted_log(self):
+        input_file = self.write_text(
+            "prune-exdate-log.ics",
+            """
+            BEGIN:VCALENDAR
+            VERSION:2.0
+            PRODID:-//ics-edit tests//EN
+            BEGIN:VEVENT
+            UID:prune-exdate-log@example.com
+            SUMMARY:Pruned Exception
+            DTSTART:20240101T090000Z
+            DTEND:20240101T100000Z
+            RRULE:FREQ=WEEKLY
+            EXDATE:20240205T090000Z,20250707T090000Z
+            END:VEVENT
+            END:VCALENDAR
+            """,
+        )
+        output_file = self.workdir / "out-prune-exdate-log.ics"
+        deleted_log = self.workdir / "deleted-pruned.tsv"
+
+        result = self.run_script(
+            "-d",
+            "2025-01-01",
+            "-t",
+            "UTC",
+            "--prune-old-exceptions",
+            "--deleted-log",
+            str(deleted_log),
+            "-o",
+            str(output_file),
+            str(input_file),
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        log_content = deleted_log.read_text(encoding="utf-8")
+        self.assertIn("prune-exdate-log@example.com", log_content)
+        self.assertIn("2024-02-05 09:00:00+00:00", log_content)
+        self.assertIn("pruned_exdate_before_cutoff", log_content)
 
     def test_dry_run_and_stats_and_deleted_log(self):
         input_file = self.fixture_copy("count.ics")

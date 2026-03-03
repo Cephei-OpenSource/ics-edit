@@ -9,12 +9,15 @@ The script removes expired calendar entries in an ICS file. Entries are deleted 
 - Removes single events whose end (`DTEND` or `DTSTART + DURATION`) is before a cutoff date.
 - Removes recurring events only when the series has a clear end (`UNTIL` or `COUNT`) and the last occurrence end is before cutoff.
 - Keeps recurring events without `UNTIL`/`COUNT`.
+- Optionally shifts open recurring events to the first occurrence on or after cutoff (`--shift-open-recurrence-starts`).
 - Keeps events without end information (`DTEND` and `DURATION` both missing).
 - Preserves calendar metadata and non-event components.
 - Writes to stdout by default or to an output file.
 - Supports `--dry-run` and `--stats` to preview changes safely.
 - Supports `--in-place` with automatic backup creation.
 - Supports `--deleted-log` to export all deleted entries for manual review.
+- Supports `--shifted-log` to export all shifted entries for manual review.
+- Supports `--prune-old-exceptions` to remove old `EXDATE` exceptions from kept recurring events.
 
 ## Requirements
 
@@ -33,7 +36,7 @@ pip install icalendar pytz python-dateutil
 ## Usage
 
 ```bash
-python3 remove-old-ics-entries.py [-h] [-d DATE] [-t TIMEZONE] [-o OUTPUT] [--dry-run] [--stats] [--deleted-log FILE] [--in-place] [--backup-suffix SUFFIX] [--no-backup] input_filename
+python3 remove-old-ics-entries.py [-h] [-d DATE] [-t TIMEZONE] [-o OUTPUT] [--dry-run] [--stats] [--deleted-log FILE] [--shifted-log FILE] [--shift-open-recurrence-starts] [--prune-old-exceptions] [--in-place] [--backup-suffix SUFFIX] [--no-backup] input_filename
 ```
 
 Arguments:
@@ -47,7 +50,10 @@ Arguments:
   - default: stdout
 - `--dry-run`: analyze only, do not write cleaned ICS output
 - `--stats`: print keep/remove counters and reasons to stderr
-- `--deleted-log FILE`: write every deleted `VEVENT` to a TSV file
+- `--deleted-log FILE`: write every deleted `VEVENT` and pruned `EXDATE` exception to a TSV file
+- `--shifted-log FILE`: write every shifted `VEVENT` to a TSV file
+- `--shift-open-recurrence-starts`: for open recurrences (`RRULE` without `UNTIL`/`COUNT`), move `DTSTART`/`DTEND` to first occurrence on or after cutoff
+- `--prune-old-exceptions`: remove `EXDATE` values before cutoff from kept recurring events
 - `--in-place`: overwrite input file with cleaned output
 - `--backup-suffix SUFFIX`: backup suffix for `--in-place` (default: `.bak`)
 - `--no-backup`: disable backup creation when using `--in-place`
@@ -86,6 +92,8 @@ python3 remove-old-ics-entries.py -d 2025-07-01 --in-place calendar.ics
 - For recurring events:
   - with `UNTIL` or `COUNT`: deletes if the last occurrence end is before cutoff.
   - without `UNTIL`/`COUNT`: kept.
+  - without `UNTIL`/`COUNT` and `--shift-open-recurrence-starts`: kept, but `DTSTART` (and `DTEND` if present) is moved to the first occurrence on or after cutoff.
+  - with `--prune-old-exceptions`: old `EXDATE` values before cutoff are removed from kept events.
   - without event duration/end information: kept.
 - `EXDATE` and `RDATE` are considered when determining the last finite recurrence occurrence.
 - Dates are evaluated in the timezone passed via `--timezone` (default: `Europe/Berlin`).

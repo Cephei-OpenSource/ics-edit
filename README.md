@@ -53,7 +53,12 @@ Arguments:
 - `--deleted-log FILE`: write every deleted `VEVENT` and pruned `EXDATE` exception to a TSV file
 - `--shifted-log FILE`: write every shifted `VEVENT` to a TSV file
 - `--shift-open-recurrence-starts`: for open recurrences (`RRULE` without `UNTIL`/`COUNT`), move `DTSTART`/`DTEND` to first occurrence on or after cutoff
+  - why this matters: open recurrences can run for many years with a short ICS representation, but calendar apps still need to evaluate all past virtual occurrences when building recurrence trees. This can make sync/update operations slow because recurrence expansion is often re-run after every calendar change.
+  - practical effect: shifting the start to the cutoff removes historical recurrence expansion work while keeping future behavior, which can produce very large performance gains in some calendar clients.
+  - safe usage: use when you do not need historical instances before cutoff in the target ICS anymore.
 - `--prune-old-exceptions`: remove `EXDATE` values before cutoff from kept recurring events
+  - this only changes kept recurring events and only removes exception dates that are already in the past relative to cutoff.
+  - useful together with `--shift-open-recurrence-starts` to reduce stale exception history and keep recurring event data compact.
 - `--in-place`: overwrite input file with cleaned output
 - `--backup-suffix SUFFIX`: backup suffix for `--in-place` (default: `.bak`)
 - `--no-backup`: disable backup creation when using `--in-place`
@@ -93,7 +98,9 @@ python3 remove-old-ics-entries.py -d 2025-07-01 --in-place calendar.ics
   - with `UNTIL` or `COUNT`: deletes if the last occurrence end is before cutoff.
   - without `UNTIL`/`COUNT`: kept.
   - without `UNTIL`/`COUNT` and `--shift-open-recurrence-starts`: kept, but `DTSTART` (and `DTEND` if present) is moved to the first occurrence on or after cutoff.
+    - performance note: this can significantly speed up some ICS calendar apps by avoiding expansion of very long past recurrence history after each calendar change.
   - with `--prune-old-exceptions`: old `EXDATE` values before cutoff are removed from kept events.
+    - intent: remove historical exception clutter that no longer affects future scheduling.
   - without event duration/end information: kept.
 - `EXDATE` and `RDATE` are considered when determining the last finite recurrence occurrence.
 - Dates are evaluated in the timezone passed via `--timezone` (default: `Europe/Berlin`).
